@@ -56,9 +56,8 @@ async def login_zerodha():
 
 @app.get("/api/callback")
 async def kite_callback(request_token: str):
-    """Zerodha redirects here after login. We generate the session and arm the system."""
+    """Zerodha redirects here. We generate the session, arm the system, and display the tokens."""
     try:
-        # Initialize a temporary client to exchange the token
         temp_kite = KiteConnect(api_key=kite_api_key)
         data = temp_kite.generate_session(request_token, api_secret=kite_api_secret)
         access_token = data["access_token"]
@@ -70,12 +69,43 @@ async def kite_callback(request_token: str):
         engine.kite = temp_kite
         print("SYSTEM: Live KiteConnect API Initialized Successfully.")
         
-        # Redirect back to the trading dashboard with a success flag
-        return RedirectResponse(url="/?status=connected")
+        # Intercept the redirect to display the tokens for multi-app usage
+        html_content = f"""
+        <html>
+            <head>
+                <title>Alpha Engine | Auth Success</title>
+                <style>
+                    body {{ font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; padding: 50px; text-align: center; }}
+                    .container {{ background: #161b22; border: 1px solid #30363d; padding: 30px; border-radius: 8px; display: inline-block; text-align: left; max-width: 600px; }}
+                    h2 {{ color: #3fb950; margin-top: 0; }}
+                    .token-box {{ background: #000; padding: 12px; border: 1px solid #30363d; border-radius: 4px; color: #58a6ff; word-wrap: break-word; font-weight: bold; margin-bottom: 20px; user-select: all; }}
+                    button {{ background: #1f6feb; color: white; border: none; padding: 12px 24px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; margin-top: 10px; }}
+                    button:hover {{ background: #388bfd; }}
+                    .warning {{ color: #ff7b72; font-size: 0.9em; margin-top: -10px; margin-bottom: 20px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h2>[✓] API Authorization Successful</h2>
+                    <p>Your Alpha Engine radar is now armed and live. You can copy your tokens below for your other applications.</p>
+                    
+                    <label style="color: #8b949e; font-weight: bold;">Request Token:</label>
+                    <div class="token-box">{request_token}</div>
+                    
+                    <label style="color: #8b949e; font-weight: bold;">Live Access Token (Use this for your other apps):</label>
+                    <div class="token-box">{access_token}</div>
+                    <div class="warning">*Note: The Request Token has already been consumed. Use the Access Token to authenticate external apps today.</div>
+                    
+                    <button onclick="window.location.href='/?status=connected'">PROCEED TO QUANT DESK</button>
+                </div>
+            </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
         
     except Exception as e:
         print(f"SYSTEM: Auth Failed - {e}")
-        return HTMLResponse(f"<h1>Zerodha Auth Failed</h1><p>{str(e)}</p>")
+        return HTMLResponse(f"<h1 style='color: red; font-family: monospace;'>Zerodha Auth Failed</h1><p>{str(e)}</p>")
 
 # --- CORE TRADING ROUTES ---
 @app.get("/")

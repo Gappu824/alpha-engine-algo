@@ -41,14 +41,21 @@ class AlphaEngine:
         return sigma
 
     # --- LIVE DATA INGESTION ---
+    # --- LIVE DATA INGESTION ---
     def fetch_live_market_data(self, instrument):
         """Pulls live Tick Data, Market Depth, and Option Chain."""
         if not self.kite:
+            print("SYSTEM: No Kite client. Using mock data.")
             return self._mock_live_data()
 
         try:
-            # Future real Kite API logic goes here
-            pass
+            # We are connected to Zerodha! 
+            # TODO: Next step is to add Kite Instrument Token mapping here.
+            # Example: quote = self.kite.quote(["NFO:NIFTY26MAY24000CE"])
+            
+            # For right now, return the mock structural data so the AI Radar math doesn't crash
+            return self._mock_live_data()
+            
         except Exception as e:
             print(f"Kite API Error: {e}")
             return self._mock_live_data()

@@ -6,27 +6,21 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from kiteconnect import KiteConnect
 
-# Import your quantitative engine
 from alpha_engine import AlphaEngine
 
-# Load environment variables
 load_dotenv()
 
-# --- SYSTEM CONFIGURATION ---
 MAX_RISK = float(os.getenv("MAX_RISK_PER_TRADE", 5000))
 MIN_RR = float(os.getenv("MIN_RR_RATIO", 1.5))
-
 kite_api_key = os.getenv("KITE_API_KEY")
 kite_api_secret = os.getenv("KITE_API_SECRET")
 
-# Initialize Engine with NO Kite client initially (Runs in Mock Data mode on boot)
+# Initialize Engine with NO Kite client initially
 engine = AlphaEngine(max_risk_capital=MAX_RISK, min_rr=MIN_RR, kite_client=None)
 
-# --- FASTAPI SERVER SETUP ---
 app = FastAPI(title="Alpha Engine Algo Desk")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
@@ -45,96 +39,71 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# --- ONE-CLICK AUTHENTICATION ROUTES ---
+# --- 1. NEW TAB LOGIN ROUTE ---
 @app.get("/login")
 async def login_zerodha():
-    """Redirects the user to the Zerodha Login Page"""
     if not kite_api_key:
-        return HTMLResponse("<h1>Error: KITE_API_KEY not found in environment variables.</h1>")
+        return HTMLResponse("<h1>Error: KITE_API_KEY not found.</h1>")
     login_url = f"https://kite.trade/connect/login?api_key={kite_api_key}&v=3"
     return RedirectResponse(url=login_url)
 
+# --- 2. DISPLAY TOKEN ROUTE (Opens in New Tab) ---
 @app.get("/api/callback")
 async def kite_callback(request_token: str):
-    """Zerodha redirects here. We generate the session, arm the system, and display the tokens."""
+    """Zerodha redirects here. We just display the token for the user to copy."""
+    html_content = f"""
+    <html>
+        <body style="background: #0d1117; color: #c9d1d9; font-family: monospace; padding: 50px; text-align: center;">
+            <h2 style="color: #3fb950;">Login Successful</h2>
+            <p>Copy this Request Token and paste it into your Alpha Engine dashboard:</p>
+            <div style="background: #000; padding: 20px; border: 1px solid #30363d; display: inline-block; font-size: 24px; font-weight: bold; user-select: all; color: #58a6ff;">
+                {request_token}
+            </div>
+            <p style="margin-top: 30px; color: #8b949e;">You can close this tab after copying.</p>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+# --- 3. CONNECT BROKER ROUTE (Receives Token from Dashboard) ---
+@app.post("/api/connect")
+async def connect_broker(request: Request):
+    """Receives the pasted token from the UI, arms the engine, and returns the access token."""
     try:
+        data = await request.json()
+        req_token = data.get("request_token")
+        
         temp_kite = KiteConnect(api_key=kite_api_key)
-        data = temp_kite.generate_session(request_token, api_secret=kite_api_secret)
-        access_token = data["access_token"]
+        session_data = temp_kite.generate_session(req_token, api_secret=kite_api_secret)
+        access_token = session_data["access_token"]
         
-        # Lock the access token into the client
         temp_kite.set_access_token(access_token)
-        
-        # Inject the live client directly into the running Alpha Engine
         engine.kite = temp_kite
+        
         print("SYSTEM: Live KiteConnect API Initialized Successfully.")
-        
-        # Intercept the redirect to display the tokens for multi-app usage
-        html_content = f"""
-        <html>
-            <head>
-                <title>Alpha Engine | Auth Success</title>
-                <style>
-                    body {{ font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; padding: 50px; text-align: center; }}
-                    .container {{ background: #161b22; border: 1px solid #30363d; padding: 30px; border-radius: 8px; display: inline-block; text-align: left; max-width: 600px; }}
-                    h2 {{ color: #3fb950; margin-top: 0; }}
-                    .token-box {{ background: #000; padding: 12px; border: 1px solid #30363d; border-radius: 4px; color: #58a6ff; word-wrap: break-word; font-weight: bold; margin-bottom: 20px; user-select: all; }}
-                    button {{ background: #1f6feb; color: white; border: none; padding: 12px 24px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; margin-top: 10px; }}
-                    button:hover {{ background: #388bfd; }}
-                    .warning {{ color: #ff7b72; font-size: 0.9em; margin-top: -10px; margin-bottom: 20px; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h2>[✓] API Authorization Successful</h2>
-                    <p>Your Alpha Engine radar is now armed and live. You can copy your tokens below for your other applications.</p>
-                    
-                    <label style="color: #8b949e; font-weight: bold;">Request Token:</label>
-                    <div class="token-box">{request_token}</div>
-                    
-                    <label style="color: #8b949e; font-weight: bold;">Live Access Token (Use this for your other apps):</label>
-                    <div class="token-box">{access_token}</div>
-                    <div class="warning">*Note: The Request Token has already been consumed. Use the Access Token to authenticate external apps today.</div>
-                    
-                    <button onclick="window.location.href='/?status=connected'">PROCEED TO QUANT DESK</button>
-                </div>
-            </body>
-        </html>
-        """
-        return HTMLResponse(content=html_content)
-        
+        return {"status": "success", "access_token": access_token}
     except Exception as e:
         print(f"SYSTEM: Auth Failed - {e}")
-        return HTMLResponse(f"<h1 style='color: red; font-family: monospace;'>Zerodha Auth Failed</h1><p>{str(e)}</p>")
+        return {"status": "error", "message": str(e)}
 
 # --- CORE TRADING ROUTES ---
 @app.get("/")
 async def get_dashboard():
-    """Serves the front-end terminal UI"""
     with open("static/index.html", "r") as file:
-        html_content = file.read()
-    return HTMLResponse(html_content)
+        return HTMLResponse(file.read())
 
 @app.post("/api/signal")
 async def receive_signal(request: Request):
-    """Endpoint to receive trade signals via POST and process through the Engine."""
     signal_data = await request.json()
-    
-    # Process through the Quant Engine
     engine_decision = engine.process_signal(signal_data)
-    
-    # Broadcast decision to the live dashboard
     await manager.broadcast(json.dumps(engine_decision))
-    
     return engine_decision
 
 @app.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket for real-time frontend terminal updates."""
     await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)

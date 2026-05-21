@@ -1,0 +1,25 @@
+# Security / Environment Variables (CRITICAL)
+.env
+
+# Virtual Environments
+venv/
+env/
+.venv/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / Editor Folders
+.vscode/
+.idea/
+*.swp
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

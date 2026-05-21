@@ -120,7 +120,11 @@ class AlphaEngine:
         current_time = datetime.now().time()
         instrument = signal_data.get('instrument', 'UNKNOWN')
         
-        if "CE" in instrument.upper() or "PE" in instrument.upper():
+        # Split the instrument string into individual words (tokens)
+        tokens = instrument.upper().split()
+        
+        # Check if "CE" or "PE" exists as an exact, standalone word
+        if "CE" in tokens or "PE" in tokens:
             if current_time >= self.theta_decay_cutoff:
                 return {"status": "REJECTED", "reason": "Theta decay zone. Terminal locked.", "instrument": instrument}
 

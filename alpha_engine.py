@@ -3,7 +3,8 @@ import numpy as np
 import math
 import logging
 import os
-from datetime import datetime, time
+import re
+from datetime import datetime, time, timezone, timedelta
 from scipy.stats import norm
 
 # Professional Logging Setup
@@ -20,61 +21,66 @@ class AlphaEngine:
         self.theta_decay_cutoff = time(decay_hour, decay_minute) 
         
         self.kite = kite_client
+        # RAM-only storage. Wiped clean on sleep, rebuilt instantly on demand.
         self.instrument_lookup = {} 
 
-    def update_kite_client(self, new_client):
-        self.kite = new_client
-        self._build_dynamic_master()
-
-    def _build_dynamic_master(self):
-        if not self.kite:
-            return
-        logger.info("SYSTEM: Downloading dynamic Instrument Master List from Exchange...")
-        try:
-            instruments = self.kite.instruments()
-            for inst in instruments:
-                self.instrument_lookup[inst['tradingsymbol']] = {
-                    "exchange": inst['exchange'],
-                    "lot_size": inst['lot_size'],
-                    "instrument_token": inst['instrument_token']
-                }
-            logger.info(f"SYSTEM: Loaded {len(self.instrument_lookup)} instruments into memory. Live routing active.")
-        except Exception as e:
-            logger.error(f"FATAL: Failed to fetch instrument master: {e}")
-
     # ==========================================
-    # STAGE 1: MARKET DATA INGESTION (LIVE ONLY)
+    # STAGE 0: JIT SMART RESOLVER (NEW)
     # ==========================================
-    def fetch_live_market_data(self, instrument):
-        """Strictly fetches live L2 data. Auto-suggests valid symbols on failure."""
-        if not self.kite:
-            raise ValueError("API DISCONNECTED: No active live session.")
-
-        clean_symbol = instrument.strip().replace(" ", "").upper()
-        meta = self.instrument_lookup.get(clean_symbol)
+    def smart_symbol_resolver(self, raw_instrument):
+        """Lazy-loads the master list and auto-resolves loose strings to exact contracts."""
         
-        # --- NEW: AUTO-SUGGEST ALGORITHM ---
-        if not meta:
-            # Extract the base asset (e.g., "NATURALGAS" or "NIFTY")
-            import re
-            base_asset_match = re.match(r"([A-Z]+)", clean_symbol)
-            base_asset = base_asset_match.group(1) if base_asset_match else ""
+        # 1. Just-In-Time RAM Load (Survives Render Sleep Cycles implicitly)
+        if not self.instrument_lookup:
+            if not self.kite:
+                raise ValueError("API DISCONNECTED: Cannot construct live tokens without active session.")
+            logger.info("SYSTEM: Wake-up detected. Fetching live Master directly into RAM...")
+            try:
+                instruments = self.kite.instruments()
+                for inst in instruments:
+                    self.instrument_lookup[inst['tradingsymbol']] = {
+                        "exchange": inst['exchange'],
+                        "lot_size": inst['lot_size']
+                    }
+                logger.info(f"Loaded {len(self.instrument_lookup)} live instruments.")
+            except Exception as e:
+                raise ValueError(f"FATAL: Failed to fetch live master: {e}")
+
+        # 2. Clean user input (removes all spaces)
+        clean = raw_instrument.strip().replace(" ", "").upper()
+        
+        # 3. If exact match is provided, return immediately
+        if clean in self.instrument_lookup:
+            return clean, self.instrument_lookup[clean]
+
+        # 4. Regex Deconstruction (e.g., NATURALGAS295CE ➔ Asset: NATURALGAS, Strike: 295, Type: CE)
+        match = re.match(r"^([A-Z]+)(\d+)(CE|PE|FUT)$", clean)
+        if not match:
+            raise ValueError(f"ROUTING FAILED: Unrecognized format '{raw_instrument}'. Use 'ASSET STRIKE TYPE' (e.g. NIFTY 24000 CE).")
             
-            # Find closest matches in RAM
-            suggestions = [
-                sym for sym in self.instrument_lookup.keys() 
-                if base_asset in sym and ("CE" in clean_symbol or "PE" in clean_symbol)
-            ]
+        base_asset, strike, opt_type = match.groups()
+        
+        # 5. Scan RAM for all active contracts matching those parameters
+        valid_candidates = []
+        for sym, meta in self.instrument_lookup.items():
+            if sym.startswith(base_asset) and sym.endswith(f"{strike}{opt_type}"):
+                valid_candidates.append((sym, meta))
+                
+        if not valid_candidates:
+            raise ValueError(f"ROUTING FAILED: No active contracts found for {base_asset} at {strike} {opt_type}.")
             
-            # Filter down to the same strike/type if possible
-            refined = [s for s in suggestions if clean_symbol[-5:] in s or clean_symbol[-4:] in s]
-            final_suggestions = refined[:3] if refined else suggestions[:3]
-            
-            suggestion_text = f" Did you mean: {', '.join(final_suggestions)}?" if final_suggestions else ""
-            raise ValueError(f"ROUTING FAILED: '{clean_symbol}' not found in Master.{suggestion_text}")
-        # ------------------------------------
-            
-        exchange_token = f"{meta['exchange']}:{clean_symbol}"
+        # 6. Sort alphabetically (Automatically surfaces the nearest active Weekly or Monthly expiry)
+        valid_candidates.sort(key=lambda x: x[0])
+        resolved_symbol, meta = valid_candidates[0]
+        
+        logger.info(f"SMART ROUTER: Auto-resolved '{raw_instrument}' ➔ {resolved_symbol}")
+        return resolved_symbol, meta
+
+    # ==========================================
+    # STAGE 1: MARKET DATA INGESTION
+    # ==========================================
+    def fetch_live_market_data(self, exact_symbol, meta):
+        exchange_token = f"{meta['exchange']}:{exact_symbol}"
         
         try:
             quote = self.kite.quote([exchange_token])
@@ -120,7 +126,7 @@ class AlphaEngine:
     # ==========================================
     def process_institutional_flow(self, raw_signal, data):
         direction = raw_signal.get('type', 'BUY').upper()
-        instrument = raw_signal['instrument'].upper()
+        instrument = raw_signal['instrument'].upper() # This is now the exact symbol
         
         is_trap = False
         skew_warning = ""
@@ -144,29 +150,28 @@ class AlphaEngine:
     # ==========================================
     # STAGE 4: ENSEMBLE AI SCORING
     # ==========================================
-    def retailor_trade(self, raw_signal):
-        # This will raise a ValueError if live data fails, instantly caught by process_signal
-        data = self.fetch_live_market_data(raw_signal['instrument'])
+    def retailor_trade(self, signal_data, meta):
+        data = self.fetch_live_market_data(signal_data['instrument'], meta)
         
-        entry = float(raw_signal.get('entry', 0))
-        raw_sl = float(raw_signal.get('sl', 0))
-        raw_tgt = float(raw_signal.get('tgt', 0))
-        direction = raw_signal.get('type', 'BUY').upper()
+        entry = float(signal_data.get('entry', 0))
+        raw_sl = float(signal_data.get('sl', 0))
+        raw_tgt = float(signal_data.get('tgt', 0))
+        direction = signal_data.get('type', 'BUY').upper()
         
-        flow_advice, is_trap = self.process_institutional_flow(raw_signal, data)
+        flow_advice, is_trap = self.process_institutional_flow(signal_data, data)
         if not flow_advice: flow_advice = "Institutional flow neutral. Relying on R:R math."
 
         total_orders = max((data['order_book_bid_qty'] + data['order_book_ask_qty']), 1)
         imbalance = (data['order_book_bid_qty'] - data['order_book_ask_qty']) / total_orders
         optimized_entry = min(entry, round(data['vwap'], 2)) if direction == 'BUY' and imbalance > 0.2 else entry
         
-        is_option = "CE" in raw_signal['instrument'].upper() or "PE" in raw_signal['instrument'].upper()
+        is_option = "CE" in signal_data['instrument'] or "PE" in signal_data['instrument']
         optimized_sl = raw_sl if is_option else data['put_wall_strike'] - 10 
         optimized_tgt = raw_tgt if is_option else data['call_wall_strike'] - 20 
 
         return {
             "ai_optimized_signal": {
-                "instrument": raw_signal['instrument'],
+                "instrument": signal_data['instrument'],
                 "entry": optimized_entry,
                 "sl": optimized_sl,
                 "tgt": optimized_tgt,
@@ -179,87 +184,63 @@ class AlphaEngine:
     # ==========================================
     # STAGE 5: RISK MANAGEMENT & EXECUTION
     # ==========================================
-    def get_dynamic_lot_size(self, instrument):
-        clean_symbol = instrument.strip().replace(" ", "").upper()
-        meta = self.instrument_lookup.get(clean_symbol)
-        if not meta:
-            raise ValueError(f"Lot size lookup failed. {clean_symbol} not in exchange master.")
-        return meta['lot_size']
-
     def process_signal(self, signal_data):
-        # 1. Enforce strict Indian Standard Time (IST) mathematically
-        from datetime import datetime, timezone, timedelta
+        raw_instrument = signal_data.get('instrument', 'UNKNOWN')
+
+        # 1. Execute JIT Smart Routing
+        try:
+            exact_symbol, meta = self.smart_symbol_resolver(raw_instrument)
+            signal_data['instrument'] = exact_symbol # Inject exact symbol downstream
+        except ValueError as e:
+            return {"status": "ERROR", "reason": str(e), "instrument": raw_instrument, "data_source": "ROUTING FAILED"}
+
+        # 2. Strict IST Time Logic
         ist_offset = timezone(timedelta(hours=5, minutes=30))
         current_time = datetime.now(ist_offset).time()
         
-        instrument = signal_data.get('instrument', 'UNKNOWN').upper()
-        tokens = instrument.split()
-        
-        # 2. Dynamic Theta Decay Routing (NSE vs MCX)
-        if "NATURALGAS" in instrument or "CRUDEOIL" in instrument or "GOLD" in instrument or "SILVER" in instrument:
-            # MCX Commodities trade until 11:30 PM / 11:55 PM
-            dynamic_cutoff = time(23, 0) # 11:00 PM Cutoff
+        if "NATURALGAS" in exact_symbol or "CRUDEOIL" in exact_symbol or "GOLD" in exact_symbol or "SILVER" in exact_symbol:
+            dynamic_cutoff = time(23, 0)
         else:
-            # NSE Equities trade until 3:30 PM
-            dynamic_cutoff = self.theta_decay_cutoff # 2:00 PM default
+            dynamic_cutoff = self.theta_decay_cutoff
             
-        # 3. Apply the time lock
-        if ("CE" in tokens or "PE" in tokens) and current_time >= dynamic_cutoff:
-            return {
-                "status": "ERROR", 
-                "reason": f"SYSTEM LOCKED: Theta decay zone active (Cutoff: {dynamic_cutoff.strftime('%H:%M')} IST).", 
-                "instrument": instrument, 
-                "data_source": "OFFLINE"
-            }
+        if ("CE" in exact_symbol or "PE" in exact_symbol) and current_time >= dynamic_cutoff:
+            return {"status": "ERROR", "reason": f"SYSTEM LOCKED: Theta decay zone active (Cutoff: {dynamic_cutoff.strftime('%H:%M')} IST).", "instrument": exact_symbol, "data_source": "OFFLINE"}
 
-        # STRICT FAIL-CLOSED EXECUTION BLOCK
+        # 3. Fire the Ensemble Pipeline
         try:
-            ai_data = self.retailor_trade(signal_data)
+            ai_data = self.retailor_trade(signal_data, meta)
         except ValueError as e:
             logger.error(f"TRADE BLOCKED: {str(e)}")
-            return {"status": "ERROR", "reason": f"EXECUTION HALTED: {str(e)}", "instrument": instrument, "data_source": "CONNECTION FAILED"}
+            return {"status": "ERROR", "reason": f"EXECUTION HALTED: {str(e)}", "instrument": exact_symbol, "data_source": "CONNECTION FAILED"}
 
         optimized = ai_data['ai_optimized_signal']
         source_telemetry = ai_data['data_source']
         
         if ai_data['is_trap']:
-            return {
-                "status": "REJECTED",
-                "reason": f"AI RADAR OVERRIDE: Severe market microstructure traps. | {ai_data['advice']}",
-                "instrument": instrument,
-                "data_source": source_telemetry
-            }
+            return {"status": "REJECTED", "reason": f"AI RADAR OVERRIDE: Severe market microstructure traps. | {ai_data['advice']}", "instrument": exact_symbol, "data_source": source_telemetry}
         
         risk_per_unit = optimized['entry'] - optimized['sl']
         reward_per_unit = optimized['tgt'] - optimized['entry']
         
         if risk_per_unit <= 0:
-            return {"status": "REJECTED", "reason": "Invalid Math: Risk is 0 or negative.", "instrument": instrument, "data_source": source_telemetry}
+            return {"status": "REJECTED", "reason": "Invalid Math: Risk is 0 or negative.", "instrument": exact_symbol, "data_source": source_telemetry}
             
         rr_ratio = reward_per_unit / risk_per_unit
         if rr_ratio < self.min_rr_ratio:
-            return {
-                "status": "REJECTED",
-                "reason": f"R:R is {rr_ratio:.2f}:1 (Min: {self.min_rr_ratio}). | {ai_data['advice']}",
-                "instrument": instrument,
-                "data_source": source_telemetry
-            }
+            return {"status": "REJECTED", "reason": f"R:R is {rr_ratio:.2f}:1 (Min: {self.min_rr_ratio}). | {ai_data['advice']}", "instrument": exact_symbol, "data_source": source_telemetry}
             
-        try:
-            lot_size = self.get_dynamic_lot_size(instrument)
-        except ValueError as e:
-            return {"status": "ERROR", "reason": str(e), "instrument": instrument, "data_source": source_telemetry}
-
+        # 4. Extract Dynamic Lot Size
+        lot_size = meta['lot_size']
         raw_qty = int(self.max_risk / risk_per_unit) if risk_per_unit > 0 else 0
         max_qty = (raw_qty // lot_size) * lot_size 
         
         if max_qty == 0:
-            return {"status": "REJECTED", "reason": f"Max risk ({self.max_risk}) cannot afford a single lot size of {lot_size}.", "instrument": instrument, "data_source": source_telemetry}
+            return {"status": "REJECTED", "reason": f"Max risk ({self.max_risk}) cannot afford a single lot size of {lot_size}.", "instrument": exact_symbol, "data_source": source_telemetry}
 
         return {
             "status": "APPROVED",
             "reason": f"R:R is {rr_ratio:.2f}:1. | {ai_data['advice']}",
-            "instrument": instrument,
+            "instrument": exact_symbol,
             "recommended_qty": max_qty,
             "entry": optimized['entry'],
             "sl": optimized['sl'],

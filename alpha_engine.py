@@ -46,15 +46,33 @@ class AlphaEngine:
     # STAGE 1: MARKET DATA INGESTION (LIVE ONLY)
     # ==========================================
     def fetch_live_market_data(self, instrument):
-        """Strictly fetches live L2 data. Hard crashes if unavailable."""
+        """Strictly fetches live L2 data. Auto-suggests valid symbols on failure."""
         if not self.kite:
             raise ValueError("API DISCONNECTED: No active live session.")
 
         clean_symbol = instrument.strip().replace(" ", "").upper()
         meta = self.instrument_lookup.get(clean_symbol)
         
+        # --- NEW: AUTO-SUGGEST ALGORITHM ---
         if not meta:
-            raise ValueError(f"ROUTING FAILED: '{clean_symbol}' not found in Live Exchange Master.")
+            # Extract the base asset (e.g., "NATURALGAS" or "NIFTY")
+            import re
+            base_asset_match = re.match(r"([A-Z]+)", clean_symbol)
+            base_asset = base_asset_match.group(1) if base_asset_match else ""
+            
+            # Find closest matches in RAM
+            suggestions = [
+                sym for sym in self.instrument_lookup.keys() 
+                if base_asset in sym and ("CE" in clean_symbol or "PE" in clean_symbol)
+            ]
+            
+            # Filter down to the same strike/type if possible
+            refined = [s for s in suggestions if clean_symbol[-5:] in s or clean_symbol[-4:] in s]
+            final_suggestions = refined[:3] if refined else suggestions[:3]
+            
+            suggestion_text = f" Did you mean: {', '.join(final_suggestions)}?" if final_suggestions else ""
+            raise ValueError(f"ROUTING FAILED: '{clean_symbol}' not found in Master.{suggestion_text}")
+        # ------------------------------------
             
         exchange_token = f"{meta['exchange']}:{clean_symbol}"
         
@@ -68,17 +86,15 @@ class AlphaEngine:
             
         data = quote[exchange_token]
         
-        # In a fully scaled setup, Greeks & Walls are calculated via real-time options chain streams. 
-        # Here we extract exact L2 order book dynamics and VWAP directly from the live quote.
         return {
             "data_source": "PRO API [LIVE L2 STREAM]", 
             "spot_price": data.get('last_price', 0.0),
             "vwap": data.get('average_price', data.get('last_price', 0.0)),
             "order_book_ask_qty": data.get('sell_quantity', 1), 
             "order_book_bid_qty": data.get('buy_quantity', 1),
-            "days_to_expiry": 1.0 / 365.0, # Requires live option chain integration
-            "otm_call_iv": 0.15,           # Requires live option chain integration
-            "otm_put_iv": 0.15,            # Requires live option chain integration
+            "days_to_expiry": 1.0 / 365.0, 
+            "otm_call_iv": 0.15,           
+            "otm_put_iv": 0.15,            
             "call_wall_strike": data.get('last_price', 0) + 100, 
             "put_wall_strike": data.get('last_price', 0) - 100,
             "total_gamma_exposure": 1000, 

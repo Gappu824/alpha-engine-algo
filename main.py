@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +8,10 @@ from dotenv import load_dotenv
 from kiteconnect import KiteConnect
 
 from alpha_engine import AlphaEngine
+
+# Setup Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("API_Main")
 
 load_dotenv()
 
@@ -43,14 +48,13 @@ manager = ConnectionManager()
 @app.get("/login")
 async def login_zerodha():
     if not kite_api_key:
-        return HTMLResponse("<h1>Error: KITE_API_KEY not found.</h1>")
+        return HTMLResponse("<h1>Error: KITE_API_KEY not found in environment.</h1>")
     login_url = f"https://kite.trade/connect/login?api_key={kite_api_key}&v=3"
     return RedirectResponse(url=login_url)
 
-# --- 2. DISPLAY TOKEN ROUTE (Opens in New Tab) ---
+# --- 2. DISPLAY TOKEN ROUTE ---
 @app.get("/api/callback")
 async def kite_callback(request_token: str):
-    """Zerodha redirects here. We just display the token for the user to copy."""
     html_content = f"""
     <html>
         <body style="background: #0d1117; color: #c9d1d9; font-family: monospace; padding: 50px; text-align: center;">
@@ -59,16 +63,14 @@ async def kite_callback(request_token: str):
             <div style="background: #000; padding: 20px; border: 1px solid #30363d; display: inline-block; font-size: 24px; font-weight: bold; user-select: all; color: #58a6ff;">
                 {request_token}
             </div>
-            <p style="margin-top: 30px; color: #8b949e;">You can close this tab after copying.</p>
         </body>
     </html>
     """
     return HTMLResponse(content=html_content)
 
-# --- 3. CONNECT BROKER ROUTE (Receives Token from Dashboard) ---
+# --- 3. CONNECT BROKER ROUTE ---
 @app.post("/api/connect")
 async def connect_broker(request: Request):
-    """Receives the pasted token from the UI, arms the engine, and returns the access token."""
     try:
         data = await request.json()
         req_token = data.get("request_token")
@@ -78,12 +80,14 @@ async def connect_broker(request: Request):
         access_token = session_data["access_token"]
         
         temp_kite.set_access_token(access_token)
-        engine.kite = temp_kite
         
-        print("SYSTEM: Live KiteConnect API Initialized Successfully.")
+        # Inject live client into the engine
+        engine.kite = temp_kite
+        logger.info("SYSTEM: Live KiteConnect API Initialized Successfully.")
+        
         return {"status": "success", "access_token": access_token}
     except Exception as e:
-        print(f"SYSTEM: Auth Failed - {e}")
+        logger.error(f"Auth Failed: {e}")
         return {"status": "error", "message": str(e)}
 
 # --- CORE TRADING ROUTES ---
@@ -95,7 +99,10 @@ async def get_dashboard():
 @app.post("/api/signal")
 async def receive_signal(request: Request):
     signal_data = await request.json()
+    logger.info(f"Received Signal: {signal_data['instrument']}")
+    
     engine_decision = engine.process_signal(signal_data)
+    
     await manager.broadcast(json.dumps(engine_decision))
     return engine_decision
 

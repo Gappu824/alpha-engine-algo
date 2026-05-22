@@ -84,9 +84,37 @@
             const data = JSON.parse(event.data);
             const terminal = document.getElementById('terminal');
             const logEntry = document.createElement('div');
+            
+            // Handle Hard Errors (Connection Drop / Instrument Invalid)
+            if (data.status === 'ERROR') {
+                logEntry.className = 'log-entry';
+                logEntry.style.borderColor = '#ff7b72';
+                logEntry.style.background = 'rgba(255, 123, 114, 0.1)';
+                logEntry.style.color = '#ff7b72';
+                
+                logEntry.innerHTML = `
+                    <div style="display: inline-block; padding: 2px 8px; margin-bottom: 8px; border-radius: 4px; background: #da3633; color: #fff; font-weight: bold; font-size: 0.8em; letter-spacing: 1px;">
+                        ⚠️ CRITICAL SYSTEM HALT
+                    </div><br>
+                    <strong>[EXECUTION BLOCKED] ${data.instrument}</strong><br>${data.reason}
+                `;
+                terminal.prepend(logEntry);
+                return;
+            }
+
+            // Standard Execution Route (Approved/Rejected)
             logEntry.className = `log-entry ${data.status}`;
             
-            let message = `<strong>[${data.status}] ${data.instrument}</strong><br>${data.reason}`;
+            let dataSourceHtml = '';
+            if (data.data_source) {
+                // Strictly Pro Grade UI
+                dataSourceHtml = `<div style="display: inline-block; padding: 3px 8px; margin-bottom: 8px; border-radius: 4px; border: 1px solid #1f6feb; background: rgba(31, 111, 235, 0.15); color: #58a6ff; font-weight: bold; font-size: 0.8em; letter-spacing: 1px; box-shadow: 0 0 8px rgba(31,111,235,0.4);">
+                    ⚡ ${data.data_source}
+                </div><br>`;
+            }
+
+            let message = `${dataSourceHtml}<strong>[${data.status}] ${data.instrument}</strong><br>${data.reason}`;
+            
             if (data.status === 'APPROVED') {
                 message += `<br><span style="color: #fff; font-weight: bold;">ACTION: Deploy ${data.recommended_qty} Units @ ₹${data.entry.toFixed(2)}</span>`;
                 message += `<br><span style="color: #8b949e; font-size: 0.9em;">SL: ₹${data.sl.toFixed(2)} | TGT: ₹${data.target.toFixed(2)}</span>`;

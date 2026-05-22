@@ -43,7 +43,8 @@ class AlphaEngine:
         try:
             # LIVE KITE INTEGRATION
             # Assumes instrument string maps to a valid exchange token, e.g., NFO:NIFTY24MAY24000CE
-            exchange_token = f"NFO:{instrument.replace(' ', '')}" 
+            # NEW CODE (Replace with this)
+            exchange_token = instrument.strip().upper()
             quote = self.kite.quote([exchange_token])
             
             if exchange_token in quote:

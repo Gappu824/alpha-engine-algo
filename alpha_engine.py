@@ -187,13 +187,30 @@ class AlphaEngine:
         return meta['lot_size']
 
     def process_signal(self, signal_data):
-        current_time = datetime.now().time()
-        instrument = signal_data.get('instrument', 'UNKNOWN').upper()
+        # 1. Enforce strict Indian Standard Time (IST) mathematically
+        from datetime import datetime, timezone, timedelta
+        ist_offset = timezone(timedelta(hours=5, minutes=30))
+        current_time = datetime.now(ist_offset).time()
         
-        # Time Lock
+        instrument = signal_data.get('instrument', 'UNKNOWN').upper()
         tokens = instrument.split()
-        if ("CE" in tokens or "PE" in tokens) and current_time >= self.theta_decay_cutoff:
-            return {"status": "ERROR", "reason": "SYSTEM LOCKED: Theta decay zone active.", "instrument": instrument, "data_source": "OFFLINE"}
+        
+        # 2. Dynamic Theta Decay Routing (NSE vs MCX)
+        if "NATURALGAS" in instrument or "CRUDEOIL" in instrument or "GOLD" in instrument or "SILVER" in instrument:
+            # MCX Commodities trade until 11:30 PM / 11:55 PM
+            dynamic_cutoff = time(23, 0) # 11:00 PM Cutoff
+        else:
+            # NSE Equities trade until 3:30 PM
+            dynamic_cutoff = self.theta_decay_cutoff # 2:00 PM default
+            
+        # 3. Apply the time lock
+        if ("CE" in tokens or "PE" in tokens) and current_time >= dynamic_cutoff:
+            return {
+                "status": "ERROR", 
+                "reason": f"SYSTEM LOCKED: Theta decay zone active (Cutoff: {dynamic_cutoff.strftime('%H:%M')} IST).", 
+                "instrument": instrument, 
+                "data_source": "OFFLINE"
+            }
 
         # STRICT FAIL-CLOSED EXECUTION BLOCK
         try:

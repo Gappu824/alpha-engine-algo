@@ -89,7 +89,30 @@ async def connect_broker(request: Request):
     except Exception as e:
         logger.error(f"Auth Failed: {e}")
         return {"status": "error", "message": str(e)}
-
+# --- 4. LIVE INSTRUMENT SEARCH (THE PRO FIX) ---
+@app.get("/api/search")
+async def search_master(asset: str = "NATURALGAS", opt_type: str = "PE"):
+    """Queries the live RAM master list to prevent guessing symbols."""
+    if not engine.instrument_lookup:
+        return {"status": "error", "message": "Master list empty. Click CONNECT first."}
+    
+    asset_upper = asset.upper()
+    type_upper = opt_type.upper()
+    
+    valid_contracts = []
+    for sym in engine.instrument_lookup.keys():
+        # Match the asset and the option type (CE/PE)
+        if asset_upper in sym and sym.endswith(type_upper):
+            valid_contracts.append(sym)
+            
+    # Sort them so they are easy to read
+    valid_contracts.sort()
+    
+    return {
+        "status": "success", 
+        "total_active_contracts": len(valid_contracts),
+        "valid_symbols": valid_contracts
+    }
 # --- CORE TRADING ROUTES ---
 @app.get("/")
 async def get_dashboard():

@@ -39,8 +39,19 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
+        dead_connections = []
         for connection in self.active_connections:
-            await connection.send_text(message)
+            try:
+                # Attempt to send the execution log to the frontend
+                await connection.send_text(message)
+            except Exception as e:
+                # If the network pipe is dead (ping timeout, closed tab), catch the error
+                logger.warning(f"WebSocket send failed, marking as dead. Error: {e}")
+                dead_connections.append(connection)
+        
+        # Silently sweep and remove any ghost connections so they don't crash future trades
+        for dead in dead_connections:
+            self.disconnect(dead)
 
 manager = ConnectionManager()
 

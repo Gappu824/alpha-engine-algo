@@ -27,10 +27,12 @@ class AlphaEngine:
     # ==========================================
     # STAGE 0: JIT SMART RESOLVER (NEW)
     # ==========================================
+    # ==========================================
+    # STAGE 0: JIT SMART RESOLVER
+    # ==========================================
     def smart_symbol_resolver(self, raw_instrument):
-        """Lazy-loads the master list and auto-resolves loose strings to exact contracts."""
+        """Lazy-loads the master list and auto-resolves loose strings chronologically."""
         
-        # 1. Just-In-Time RAM Load (Survives Render Sleep Cycles implicitly)
         if not self.instrument_lookup:
             if not self.kite:
                 raise ValueError("API DISCONNECTED: Cannot construct live tokens without active session.")
@@ -46,21 +48,17 @@ class AlphaEngine:
             except Exception as e:
                 raise ValueError(f"FATAL: Failed to fetch live master: {e}")
 
-        # 2. Clean user input (removes all spaces)
         clean = raw_instrument.strip().replace(" ", "").upper()
         
-        # 3. If exact match is provided, return immediately
         if clean in self.instrument_lookup:
             return clean, self.instrument_lookup[clean]
 
-        # 4. Regex Deconstruction (e.g., NATURALGAS295CE ➔ Asset: NATURALGAS, Strike: 295, Type: CE)
         match = re.match(r"^([A-Z]+)(\d+)(CE|PE|FUT)$", clean)
         if not match:
             raise ValueError(f"ROUTING FAILED: Unrecognized format '{raw_instrument}'. Use 'ASSET STRIKE TYPE' (e.g. NIFTY 24000 CE).")
             
         base_asset, strike, opt_type = match.groups()
         
-        # 5. Scan RAM for all active contracts matching those parameters
         valid_candidates = []
         for sym, meta in self.instrument_lookup.items():
             if sym.startswith(base_asset) and sym.endswith(f"{strike}{opt_type}"):
@@ -69,9 +67,25 @@ class AlphaEngine:
         if not valid_candidates:
             raise ValueError(f"ROUTING FAILED: No active contracts found for {base_asset} at {strike} {opt_type}.")
             
-        # 6. Sort alphabetically (Automatically surfaces the nearest active Weekly or Monthly expiry)
-        valid_candidates.sort(key=lambda x: x[0])
+        # --- CHRONOLOGICAL SORTING ALGORITHM ---
+        # Maps 3-letter strings to numbers so MAY (05) sorts before DEC (12)
+        month_order = {
+            "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04", "MAY": "05", "JUN": "06", 
+            "JUL": "07", "AUG": "08", "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12"
+        }
+        
+        def chronological_key(item):
+            sym = item[0]
+            for month, num in month_order.items():
+                if month in sym:
+                    # Swaps 'BANKNIFTY26DEC' to 'BANKNIFTY2612' for math sorting
+                    return sym.replace(month, num)
+            return sym
+
+        # Sorts chronologically and grabs the nearest near-month contract
+        valid_candidates.sort(key=chronological_key)
         resolved_symbol, meta = valid_candidates[0]
+        # ----------------------------------------
         
         logger.info(f"SMART ROUTER: Auto-resolved '{raw_instrument}' ➔ {resolved_symbol}")
         return resolved_symbol, meta
